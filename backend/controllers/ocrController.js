@@ -799,7 +799,8 @@ const callGroqAPI = async (imageBase64, textPrompt, isPdf = false, backImageBase
           model,
           messages,
           temperature: 0,
-          max_tokens: 512
+          max_completion_tokens: 2048,
+          max_tokens: 2048
         }
         if (withFormat) body.response_format = { type: 'json_object' }
         return axios.post('https://api.groq.com/openai/v1/chat/completions', body, {
@@ -866,7 +867,8 @@ const callGroqAPI = async (imageBase64, textPrompt, isPdf = false, backImageBase
         model,
         messages: [{ role: 'user', content: contentArray }],
         temperature: 0.1,
-        max_completion_tokens: 2048
+        max_completion_tokens: 2048,
+        max_tokens: 2048
       }
       if (withFormat) body.response_format = { type: 'json_object' }
       return axios.post('https://api.groq.com/openai/v1/chat/completions', body, {
@@ -942,14 +944,15 @@ Respond ONLY with a valid JSON object matching this structure exactly (use empty
 ${jsonTemplate}`
 
     const response = await callGroqAPI(payload, fullPrompt, isPdf, backImageBase64)
-    let messageContent = response.data.choices?.[0]?.message?.content || ''
+    const choiceMsg = response.data.choices?.[0]?.message
+    let messageContent = choiceMsg?.content || choiceMsg?.reasoning || ''
 
     messageContent = messageContent.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
 
     let jsonStr = messageContent
-    const fencedMatch = messageContent.match(/```(?:json)?\n([\s\S]*?)\n```/)
+    const fencedMatch = messageContent.match(/```(?:json)?\n([\s\S]*?)\n```/) || messageContent.match(/```(?:json)?([\s\S]*?)```/)
     if (fencedMatch) {
-      jsonStr = fencedMatch[1]
+      jsonStr = fencedMatch[1].trim()
     } else {
       const objectMatch = messageContent.match(/\{[\s\S]*\}/)
       if (objectMatch) {
