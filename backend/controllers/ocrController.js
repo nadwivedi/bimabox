@@ -753,6 +753,18 @@ const withGroqKeyRotation = async (requestFn) => {
   throw lastErr
 }
 
+const GET_TEXT_MODELS = () => {
+  const custom = process.env.GROQ_TEXT_MODEL
+  const defaults = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b']
+  return [...new Set([custom, ...defaults].filter(Boolean))]
+}
+
+const GET_VISION_MODELS = () => {
+  const custom = process.env.GROQ_VISION_MODEL
+  const defaults = ['qwen/qwen3.6-27b', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b']
+  return [...new Set([custom, ...defaults].filter(Boolean))]
+}
+
 const callGroqAPI = async (imageBase64, textPrompt, isPdf = false, backImageBase64 = null) => {
   if (GROQ_API_KEYS.length === 0) {
     throw new Error('GROQ_API_KEY is not configured')
@@ -778,32 +790,55 @@ const callGroqAPI = async (imageBase64, textPrompt, isPdf = false, backImageBase
       }
     ]
 
-    const makeRequest = (withFormat) => withGroqKeyRotation((key) => {
-      const body = {
-        model: 'llama-3.3-70b-versatile',
-        messages,
-        temperature: 0,
-        max_tokens: 512
-      }
-      if (withFormat) body.response_format = { type: 'json_object' }
-      return axios.post('https://api.groq.com/openai/v1/chat/completions', body, {
-        headers: {
-          Authorization: `Bearer ${key}`,
-          'Content-Type': 'application/json',
-        },
-      })
-    })
+    const textModels = GET_TEXT_MODELS()
+    let lastError = null
 
-    try {
-      return await makeRequest(true)
-    } catch (firstErr) {
-      const errCode = firstErr.response?.data?.error?.code
-      if (errCode === 'json_validate_failed' || errCode === 'invalid_request_error') {
-        console.warn('Groq json_object mode failed, retrying in free-text mode...')
-        return await makeRequest(false)
+    for (const model of textModels) {
+      const makeRequest = (withFormat) => withGroqKeyRotation((key) => {
+        const body = {
+          model,
+          messages,
+          temperature: 0,
+          max_tokens: 512
+        }
+        if (withFormat) body.response_format = { type: 'json_object' }
+        return axios.post('https://api.groq.com/openai/v1/chat/completions', body, {
+          headers: {
+            Authorization: `Bearer ${key}`,
+            'Content-Type': 'application/json',
+          },
+        })
+      })
+
+      try {
+        return await makeRequest(true)
+      } catch (firstErr) {
+        lastError = firstErr
+        const errCode = firstErr.response?.data?.error?.code
+        if (errCode === 'json_validate_failed') {
+          console.warn(`Groq json_object mode failed for model ${model}, retrying in free-text mode...`)
+          try {
+            return await makeRequest(false)
+          } catch (retryErr) {
+            lastError = retryErr
+          }
+        } else if (errCode === 'model_not_found') {
+          console.warn(`Groq model ${model} not found or decommissioned, trying next fallback model...`)
+          continue
+        } else {
+          // If invalid_request_error, try free-text mode as fallback
+          if (firstErr.response?.data?.error?.type === 'invalid_request_error' && errCode !== 'model_not_found') {
+            try {
+              return await makeRequest(false)
+            } catch (retryErr) {
+              lastError = retryErr
+            }
+          }
+        }
       }
-      throw firstErr
     }
+
+    throw lastError
   }
 
   const formattedImage = imageBase64.startsWith('data:image')
@@ -822,33 +857,54 @@ const callGroqAPI = async (imageBase64, textPrompt, isPdf = false, backImageBase
     contentArray.push({ type: 'image_url', image_url: { url: formattedBack } })
   }
 
-  const makeVisionRequest = (withFormat) => withGroqKeyRotation((key) => {
-    const body = {
-      model: 'qwen/qwen3.6-27b',
-      messages: [{ role: 'user', content: contentArray }],
-      temperature: 0.1,
-      max_completion_tokens: 2048,
-      reasoning_format: 'hidden'
-    }
-    if (withFormat) body.response_format = { type: 'json_object' }
-    return axios.post('https://api.groq.com/openai/v1/chat/completions', body, {
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json',
-      },
-    })
-  })
+  const visionModels = GET_VISION_MODELS()
+  let lastVisionError = null
 
-  try {
-    return await makeVisionRequest(true)
-  } catch (firstErr) {
-    const errCode = firstErr.response?.data?.error?.code
-    if (errCode === 'json_validate_failed' || errCode === 'invalid_request_error') {
-      console.warn('Groq json_object mode failed for vision, retrying in free-text mode...')
-      return await makeVisionRequest(false)
+  for (const model of visionModels) {
+    const makeVisionRequest = (withFormat) => withGroqKeyRotation((key) => {
+      const body = {
+        model,
+        messages: [{ role: 'user', content: contentArray }],
+        temperature: 0.1,
+        max_completion_tokens: 2048
+      }
+      if (withFormat) body.response_format = { type: 'json_object' }
+      return axios.post('https://api.groq.com/openai/v1/chat/completions', body, {
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        },
+      })
+    })
+
+    try {
+      return await makeVisionRequest(true)
+    } catch (firstErr) {
+      lastVisionError = firstErr
+      const errCode = firstErr.response?.data?.error?.code
+      if (errCode === 'json_validate_failed') {
+        console.warn(`Groq json_object mode failed for vision model ${model}, retrying in free-text mode...`)
+        try {
+          return await makeVisionRequest(false)
+        } catch (retryErr) {
+          lastVisionError = retryErr
+        }
+      } else if (errCode === 'model_not_found') {
+        console.warn(`Groq vision model ${model} not found or decommissioned, trying next fallback model...`)
+        continue
+      } else {
+        if (firstErr.response?.data?.error?.type === 'invalid_request_error' && errCode !== 'model_not_found') {
+          try {
+            return await makeVisionRequest(false)
+          } catch (retryErr) {
+            lastVisionError = retryErr
+          }
+        }
+      }
     }
-    throw firstErr
   }
+
+  throw lastVisionError
 }
 
 const processOcrRequest = async (req, res, promptText, jsonTemplate, postProcessor = null) => {
